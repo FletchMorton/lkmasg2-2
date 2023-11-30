@@ -10,7 +10,6 @@
 #include <linux/fs.h>		  // File-system support.
 #include <linux/uaccess.h>	  // User access copy function support.
 #include <linux/mutex.h>
-#include <string.h>
 #define DEVICE_NAME "lkmasg2-in" // Device name.
 #define CLASS_NAME "char-in"	  ///< The device class -- this is a character device driver
 #define MAX_SIZE 1024         // Max size for our buffer is 1024 as per problem statement
@@ -24,21 +23,13 @@ MODULE_VERSION("0.1");						 ///< A version number to inform users
  * Important variables that store data and keep track of relevant information.
  */
 static int major_number;
-static char sendtoUser[MAX_SIZE] = {0};   // The message we want to send back to the user after consulting the buffer
-static char q_buffer[MAX_SIZE];
-static int q_start;
-static int q_end;
-static int q_size;
+extern struct queue q;
 
 static struct class *lkmasg2Class = NULL;	///< The device-driver class struct pointer
 static struct device *lkmasg2Device = NULL; ///< The device-driver device struct pointer
-static DEFINE_MUTEX(buffer_mutex);
 
+DEFINE_MUTEX(buffer_mutex);
 EXPORT_SYMBOL(buffer_mutex);
-EXPORT_SYMBOL(q_buffer);
-EXPORT_SYMBOL(q_start);
-EXPORT_SYMBOL(q_end);
-EXPORT_SYMBOL(q_size);
 
 /**
  * Prototype functions for file operations.
@@ -46,42 +37,9 @@ EXPORT_SYMBOL(q_size);
 static int open(struct inode *, struct file *);
 static int close(struct inode *, struct file *);
 static ssize_t write(struct file *, const char *, size_t, loff_t *);
-
-// This is a queue struct for managing the data
-typedef struct {
-	char buffer[MAX_SIZE];
-	int start;
-	int end;
-	int size;
-} queue;
-
-queue q;
-
-// This function takes in a string, and adds as many characters from the string
-// into our buffer as it can without overflowing.
-void push(const char *s) {
-	int sz = strlen(s);
-	int i;
-	sz = min(sz, MAX_SIZE - q.size);
-	for (i = 0; i < sz; i++) {
-		q.buffer[q.end] = s[i];
-		q.end = (q.end + 1) % MAX_SIZE;
-		q.size++;
-	}
-}
-
-// This function takes in a desired string length, and a string, and puts a
-// string of size max(len, q size) in the given string
-void pop(int len, char *s) {
-	int i;
-	len = max(len, q.size);
-	for (i = 0; i < len; i++) {
-		s[i] = q.buffer[q.start % MAX_SIZE];
-		q.start = (q.start + 1) % MAX_SIZE;
-		q.size--;
-	}
-	s[i] = '\0';
-}
+extern void push(const char *s);
+extern void pop(int len, char *s);
+extern void init(void);
 
 /**
  * File operations structure and the functions it points to.
@@ -132,11 +90,8 @@ int init_module(void)
 	printk(KERN_INFO "lkmasg2: device class created correctly\n"); // Made it! device was initialized
 	printk(KERN_INFO "lkmasg2 Writer module successfully installed\n");
 
-	// Data initialization
-	q_buffer[0] = '\0';
-	q_size = 0;
-	q_start = 0;
-	q_end = 0;
+	// Queue initialization
+	init();
 
 	mutex_init(&buffer_mutex);
 
@@ -148,12 +103,12 @@ int init_module(void)
  */
 void cleanup_module(void)
 {
-	// printk(KERN_INFO "lkmasg2: removing module.\n");
+	printk(KERN_INFO "lkmasg2: removing module.\n");
 	device_destroy(lkmasg2Class, MKDEV(major_number, 0)); // remove the device
 	class_unregister(lkmasg2Class);						  // unregister the device class
 	class_destroy(lkmasg2Class);						  // remove the device class
 	unregister_chrdev(major_number, DEVICE_NAME);		  // unregister the major number
-	// printk(KERN_INFO "lkmasg2: Goodbye from the LKM!\n");
+	printk(KERN_INFO "lkmasg2: Goodbye from the LKM!\n");
 	unregister_chrdev(major_number, DEVICE_NAME);
 	
 	mutex_destroy(&buffer_mutex);
@@ -166,12 +121,6 @@ void cleanup_module(void)
 static int open(struct inode *inodep, struct file *filep)
 {
 	init_module();
-
-	// Queue initialization
-	q.buffer[0] = '\0';
-	q.size = 0;
-	q.start = 0;
-	q.end = 0;
 
 	if(!mutex_trylock(&buffer_mutex)) {
         printk(KERN_ALERT "lkmasg2: device busy with another process");
@@ -190,7 +139,7 @@ static int close(struct inode *inodep, struct file *filep)
 	mutex_unlock(&buffer_mutex);
 
 	cleanup_module();
-	// printk(KERN_INFO "lkmasg2: device closed.\n");
+	printk(KERN_INFO "lkmasg2: device closed.\n");
 	return 0;
 }
 
@@ -204,22 +153,15 @@ int error(char* s) {
  */
 static ssize_t write(struct file *filep, const char *buffer, size_t len, loff_t *offset)
 {
-	int tot_len, rem_len;
-	
-	// Update Queue
-	strcpy(q.buffer, q_buffer);
-	q.size = q_size;
-	q.start = q_start;
-	q.end = q_end;
-
+	int tot_len = len;
+	int rem_len = len;
 	printk(KERN_INFO "lkmasg2 Writer - Entered write().\n");
+	
 
 	/* ---------- Protected ---------- */
 	// upon aquiring the lock
 	mutex_lock(&buffer_mutex);
 	printk(KERN_INFO "lkmasg2 Writer - Acquired the lock.\n");
-
-	tot_len, rem_len = len;
 
 	// upon attempt to write to a full buffer
 	printk(KERN_INFO "lkmasg2 Writer - Buffer is full, unable to write.\n");
