@@ -9,6 +9,8 @@
 #include <linux/kernel.h>	  // Kernel header for convenient functions.
 #include <linux/fs.h>		  // File-system support.
 #include <linux/uaccess.h>	  // User access copy function support.
+#include <linux/mutex.h>
+#include <string.h>
 #define DEVICE_NAME "lkmasg2-in" // Device name.
 #define CLASS_NAME "char-in"	  ///< The device class -- this is a character device driver
 #define MAX_SIZE 1024         // Max size for our buffer is 1024 as per problem statement
@@ -30,8 +32,8 @@ static int q_size;
 
 static struct class *lkmasg2Class = NULL;	///< The device-driver class struct pointer
 static struct device *lkmasg2Device = NULL; ///< The device-driver device struct pointer
+static DEFINE_MUTEX(buffer_mutex);
 
-DEFINE_MUTEX(buffer_mutex);
 EXPORT_SYMBOL(buffer_mutex);
 EXPORT_SYMBOL(q_buffer);
 EXPORT_SYMBOL(q_start);
@@ -47,10 +49,10 @@ static ssize_t write(struct file *, const char *, size_t, loff_t *);
 
 // This is a queue struct for managing the data
 typedef struct {
-	q_buffer[MAX_SIZE];
-	q_start;
-	q_end;
-	q_size;
+	char buffer[MAX_SIZE];
+	int start;
+	int end;
+	int size;
 } queue;
 
 queue q;
@@ -60,11 +62,11 @@ queue q;
 void push(const char *s) {
 	int sz = strlen(s);
 	int i;
-	sz = min(sz, MAX_SIZE - q.q_size);
+	sz = min(sz, MAX_SIZE - q.size);
 	for (i = 0; i < sz; i++) {
-		q.q_buffer[q.q_end] = s[i];
-		q.q_end = (q.q_end + 1) % MAX_SIZE;
-		q.q_size++;
+		q.buffer[q.end] = s[i];
+		q.end = (q.end + 1) % MAX_SIZE;
+		q.size++;
 	}
 }
 
@@ -72,11 +74,11 @@ void push(const char *s) {
 // string of size max(len, q size) in the given string
 void pop(int len, char *s) {
 	int i;
-	len = max(len, q.q_size);
+	len = max(len, q.size);
 	for (i = 0; i < len; i++) {
-		s[i] = q.q_buffer[q.q_start % MAX_SIZE];
-		q.q_start = (q.q_start + 1) % MAX_SIZE;
-		q.q_size--;
+		s[i] = q.buffer[q.start % MAX_SIZE];
+		q.start = (q.start + 1) % MAX_SIZE;
+		q.size--;
 	}
 	s[i] = '\0';
 }
@@ -97,7 +99,7 @@ static struct file_operations fops =
  */
 int init_module(void)
 {
-	// printk(KERN_INFO "lkmasg2: installing module.\n");
+	printk(KERN_INFO "lkmasg2: installing module.\n");
 
 	// Allocate a major number for the device.
 	major_number = register_chrdev(0, DEVICE_NAME, &fops);
@@ -106,7 +108,7 @@ int init_module(void)
 		printk(KERN_ALERT "lkmasg2 could not register number.\n");
 		return major_number;
 	}
-	// printk(KERN_INFO "lkmasg2: registered correctly with major number %d\n", major_number);
+	printk(KERN_INFO "lkmasg2: registered correctly with major number %d\n", major_number);
 
 	// Register the device class
 	lkmasg2Class = class_create(THIS_MODULE, CLASS_NAME);
@@ -116,7 +118,7 @@ int init_module(void)
 		printk(KERN_ALERT "Failed to register device class\n");
 		return PTR_ERR(lkmasg2Class); // Correct way to return an error on a pointer
 	}
-	// printk(KERN_INFO "lkmasg2: device class registered correctly\n");
+	printk(KERN_INFO "lkmasg2: device class registered correctly\n");
 
 	// Register the device driver
 	lkmasg2Device = device_create(lkmasg2Class, NULL, MKDEV(major_number, 0), NULL, DEVICE_NAME);
@@ -127,10 +129,10 @@ int init_module(void)
 		printk(KERN_ALERT "Failed to create the device\n");
 		return PTR_ERR(lkmasg2Device);
 	}
-	// printk(KERN_INFO "lkmasg2: device class created correctly\n"); // Made it! device was initialized
+	printk(KERN_INFO "lkmasg2: device class created correctly\n"); // Made it! device was initialized
 	printk(KERN_INFO "lkmasg2 Writer module successfully installed\n");
 
-	// Queue initialization
+	// Data initialization
 	q_buffer[0] = '\0';
 	q_size = 0;
 	q_start = 0;
@@ -165,12 +167,18 @@ static int open(struct inode *inodep, struct file *filep)
 {
 	init_module();
 
+	// Queue initialization
+	q.buffer[0] = '\0';
+	q.size = 0;
+	q.start = 0;
+	q.end = 0;
+
 	if(!mutex_trylock(&buffer_mutex)) {
         printk(KERN_ALERT "lkmasg2: device busy with another process");
         return -EBUSY;
     }
 
-	// printk(KERN_INFO "lkmasg2: device opened.\n");
+	printk(KERN_INFO "lkmasg2: device opened.\n");
 	return 0;
 }
 
@@ -197,13 +205,21 @@ int error(char* s) {
 static ssize_t write(struct file *filep, const char *buffer, size_t len, loff_t *offset)
 {
 	int tot_len, rem_len;
-	printk(KERN_INFO "lkmasg2 Writer - Entered write().\n");
 	
+	// Update Queue
+	strcpy(q.buffer, q_buffer);
+	q.size = q_size;
+	q.start = q_start;
+	q.end = q_end;
+
+	printk(KERN_INFO "lkmasg2 Writer - Entered write().\n");
 
 	/* ---------- Protected ---------- */
 	// upon aquiring the lock
 	mutex_lock(&buffer_mutex);
 	printk(KERN_INFO "lkmasg2 Writer - Acquired the lock.\n");
+
+	tot_len, rem_len = len;
 
 	// upon attempt to write to a full buffer
 	printk(KERN_INFO "lkmasg2 Writer - Buffer is full, unable to write.\n");
